@@ -1,0 +1,309 @@
+---
+title: "零售订单分析"
+author: "Houhei Wu"
+date: "1/20/2023"
+output:
+  html_document: default
+  pdf_document: default
+editor_options: 
+  chunk_output_type: inline
+---
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r message=FALSE, warning=FALSE}
+library(arules)
+library(tidyverse)
+library(ggplot2)
+library(lubridate,ggpubr)
+library(showtext)
+theme_set(theme_classic())
+showtext_auto()
+library(knitr)
+```
+
+#### 导入数据
+```{r}
+df = read.csv(file = "Sample - Superstore.csv")
+```
+
+
+#### 数据清理，整合
+```{r warning=FALSE}
+df = df %>% 
+  select(-c(Postal.Code)) %>% 
+  mutate(Order.Date = mdy(Order.Date), Ship.Date = mdy(Ship.Date))
+
+df = df[complete.cases(df),]
+
+df = df %>% 
+  mutate(Year = as.factor(year(Order.Date)),
+         Month = month(Order.Date, label = TRUE)) %>% 
+  select(Row.ID, Order.ID, Order.ID, Year, Month, everything())
+```
+
+# EDA
+
+#### 5000订单，9994条购买记录，793个客户
+```{r warning=FALSE}
+df %>% 
+  select(Row.ID, Order.ID, Customer.ID) %>% 
+  summarise_all(n_distinct) %>% 
+  kable(format = "markdown")
+```
+
+#### 2018年最高利润产品前五
+```{r warning=FALSE}
+df %>% 
+  filter(Year == 2018) %>% 
+  group_by(Product.Name) %>% 
+  summarise(total_quan = sum(Quantity),
+            total_profit = sum(Profit)) %>% 
+  arrange(desc(total_profit)) %>% 
+  head(5) %>% 
+  kable(format = "markdown")
+```
+
+#### 前五销量的产品
+```{r warning=FALSE}
+df %>% 
+  filter(Year == 2018) %>% 
+  group_by(Product.Name) %>% 
+  summarise(total = sum(Quantity), profit = sum(Profit)) %>% 
+  arrange(desc(total)) %>% 
+  head(5) %>% 
+  kable(format = "markdown")
+```
+
+#发掘痛点
+
+#### 发现问题：年度利润随呈现增长形态，但增速2018年严重下滑
+```{r}
+
+df %>% 
+  group_by(year = year(Order.Date)) %>% 
+  summarise(total_profit = sum(Profit)) %>% 
+  summarise(year,  total_profit, pct_changed = 100* (total_profit-lag(total_profit)) / lag(total_profit)) %>% 
+  ggplot(aes(x = year))+
+  geom_col(aes(y = total_profit), fill = "blue", group =1)+
+  geom_point(aes(y = pct_changed*2000))+
+  geom_line(aes(y = pct_changed*2000), group = 1)+
+  scale_y_continuous(sec.axis = sec_axis(~./2000, name ="同比"))
+  
+  
+  
+```
+
+#### 从月份定位：二月五月十月十二月增速严重下滑
+```{r}
+
+df %>% 
+  filter(Year %in% c(2016,2017,2018)) %>% 
+  group_by(Year, Month) %>% 
+  summarise(month_profit = sum(Profit), 
+            month_sales = sum(Sales),
+            gross_margin = 100*(month_profit/month_sales)) %>% 
+  arrange(Month) %>% 
+  ggplot(aes(x = Month))+
+  geom_col(aes(y = month_profit, fill = Year), position = "dodge")
+
+  
+
+df %>% 
+  filter(Year %in% c(2016,2017,2018)) %>% 
+  group_by(Year, Month) %>% 
+  summarise(month_profit = sum(Profit), 
+            month_sales = sum(Sales),
+            gross_margin = 100*(month_profit/month_sales)) %>% 
+  ungroup(Year) %>% 
+  group_by(Month) %>% 
+  arrange(Month) %>% 
+  mutate(pct_change  = 100*(month_profit - lag(month_profit)) / lag(month_profit)) %>% 
+  ggplot(aes(x = Month))+
+  geom_col(aes(y = pct_change, fill = Year), position = "dodge")
+
+```
+
+#### 中部南部增幅大幅下降，东部西部保持乐观的盈利增速
+
+```{r}
+df %>% 
+  filter(Year %in% c(2016,2017,2018)) %>% 
+  group_by(Year, Region) %>% 
+  summarise(month_profit = sum(Profit), 
+            month_sales = sum(Sales),
+            gross_margin = 100*(month_profit/month_sales)) %>% 
+  ungroup(Year) %>% 
+  group_by(Region) %>% 
+  arrange(Region) %>% 
+  mutate(pct_change  = 100*(month_profit - lag(month_profit)) / lag(month_profit)) %>% 
+  ggplot(aes(x = Region))+
+  geom_col(aes(y = pct_change, fill = Year), position = "dodge")
+```
+
+#### 继续拆解分析问题： 中部，南部地区的binders，machines, copiers, tables利润大幅减少，设置出现亏本
+```{r}
+df %>%
+  filter(Region %in% c("Central", "South")) %>% 
+  group_by(Year,Sub.Category) %>% 
+  summarise(profit = sum(Profit)) %>% 
+  ggplot(aes(x = Sub.Category))+
+  geom_col(aes(y = profit, fill= Year), position = "dodge")+
+  theme(axis.text.x = element_text(angle = 90))
+  
+```
+
+#### Table 作为利润最高增速的产品，在中部与南部地区却发生亏损
+```{r warning=FALSE}
+sub.factor = df %>% 
+  filter(Year %in% c(2017,2018)) %>% 
+  group_by(Year = as.character(Year), Sub.Category) %>% 
+  summarise(month_profit = sum(Profit)) %>% 
+  ungroup(Year) %>% 
+  group_by(Sub.Category) %>% 
+  arrange(Sub.Category) %>% 
+  mutate(pct_change  = 100*(month_profit - lag(month_profit)) / lag(month_profit)) %>% 
+  filter(!is.na(pct_change)) %>% 
+  arrange(pct_change) %>%
+  pull(Sub.Category)
+  
+  
+df %>% 
+  filter(Year %in% c(2016,2017,2018),
+         Sub.Category != "Supplies") %>% 
+  group_by(Year = as.character(Year), Sub.Category) %>% 
+  summarise(month_profit = sum(Profit), 
+            month_sales = sum(Sales),
+            gross_margin = 100*(month_profit/month_sales)) %>% 
+  ungroup(Year) %>% 
+  group_by(Sub.Category) %>% 
+  arrange(Sub.Category) %>% 
+  mutate(pct_change  = 100*(month_profit - lag(month_profit)) / lag(month_profit),
+         Sub.Category = factor(Sub.Category,sub.factor )) %>% 
+  ggplot(aes(y = Sub.Category))+
+  geom_col(aes(x =  pct_change, fill = Year), position = "dodge")
+  
+```
+
+#### Copiers 销售额下降导致的利润下降，而其他产品 销售额上升或者没有明显变化的前提下，利润大幅下降，导致毛利急剧减少
+```{r}
+info = df %>% 
+  filter(Region %in% c("Central", "South"),
+         Year == 2018 | Year == 2017,
+         Sub.Category %in% c("Tables","Binders","Machines", "Copiers")) %>% 
+  group_by(Year, Sub.Category) %>% 
+  summarise(Quantity = sum(Quantity),
+            sales = sum(Sales),
+            mean_dis = mean(Discount),
+            profit = sum(Profit),
+            gm = profit/sales) %>% 
+  arrange(Sub.Category)
+
+profit = info %>% 
+  ggplot(aes(x = Sub.Category))+
+  geom_col(aes(y = profit, fill = Year), position ="dodge")
+  
+quan = info %>% 
+  ggplot(aes(x = Sub.Category))+
+  geom_col(aes(y = Quantity, fill = Year),position ="dodge" )
+
+sales  = info%>%
+  ggplot(aes(x = Sub.Category))+
+  geom_col(aes(y = sales, fill = Year), position ="dodge")
+
+info %>% 
+  kable(format = "markdown")
+```
+
+
+
+```{r}
+info %>% 
+  ggplot(aes(x = Year))+
+  geom_col(aes(y = sales), fill = "blue")+
+  geom_point(aes(y = profit*4), color = "red")+
+  geom_line(aes(y = profit*4), color = "red", group = 1)+
+  scale_y_continuous(sec.axis = sec_axis(~./4, name = "Profits"))+
+  facet_grid(~Sub.Category)
+```
+
+```{r}
+df %>% 
+  group_by(Product.Name) %>% 
+  summarise(total = sum(Quantity), profit = sum(Profit)) %>% 
+  arrange(desc(total)) %>% 
+  head(5) %>% 
+  kable(format = "markdown")
+```
+
+
+# RFM用户分类
+
+#### R: Recency, F = Frequency, M = Monetary
+
+```{r}
+latest = max(df$Order.Date) ## 最近时长
+
+R = df %>% 
+  group_by(Customer.Name) %>% 
+  summarise(R = as.integer(latest - max(Order.Date)))
+
+f = df %>% 
+  group_by(Customer.Name) %>% 
+  summarise(f = sum(latest - Order.Date <= 365))
+
+M = df %>% 
+  group_by(Customer.Name, ) %>% 
+  summarise(M = sum(Sales))
+
+RFM = R %>% 
+  inner_join(f, by = "Customer.Name") %>% 
+  inner_join(M, by = "Customer.Name")
+
+user_rating = RFM %>% 
+  summarise(Customer.Name, 
+            R = ifelse(R >= mean(R), "高","低"),
+            f = ifelse(f >= mean(f), "高","低"),
+            M = ifelse(M >= mean(M), "高","低"))
+
+```
+
+#### 分类用户
+```{r}
+user_rating = user_rating %>% 
+  filter(M =="高") %>% 
+  mutate(用户分类  = case_when(R == "高" & f == "高" ~ "重要价值",
+                          R == "低" & f == "高" ~ "重要保持",
+                          R == "高" & f == "低" ~ "重要发展",
+                          TRUE ~ "重要挽留"
+                           ))
+
+kable(head(user_rating,5), format = "markdown")
+
+```
+
+# 频繁项集
+
+#### 选择 lift 大于1 
+```{r message=FALSE, warning=FALSE, results = FALSE}
+Tran = df %>% 
+  filter(Year == 2018) %>% 
+  select(Order.ID, Sub.Category) %>% 
+  transactions(format = "long", col = c("Order.ID", "Sub.Category"))
+
+
+rules = apriori(Tran, parameter = list(supp = 0.02, conf = 0.2 ), target = "rules") %>% 
+  inspect()
+
+rules = rules[rules$lift >1,]
+```
+
+```{r}
+kable(rules, format = "markdown")
+```
+
+#### 百分之30的客户在购买Applicances之后都会购买Binders, 百分之27%在购买手机后会购买Binders. 
+
+      
+
